@@ -1,0 +1,107 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/compose-spec/compose-spec/master/schema/compose-spec.json
+
+version: '3.9'
+
+services:
+  localstack:
+    container_name: ${LOCALSTACK_DOCKER_NAME:-localstack}
+    image: docker.io/localstack/localstack:2.2.0
+    ports:
+      - 127.0.0.1:4566:4566            # LocalStack Gateway
+      - 127.0.0.1:4510-4559:4510-4559  # external services port range
+    environment:
+      # https://docs.localstack.cloud/references/configuration/
+      - DEBUG=${DEBUG:-1}
+      - LAMBDA_EXECUTOR=${LAMBDA_EXECUTOR-}
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - LS_LOG=trace
+    volumes:
+      - localstack:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/src
+    working_dir: /opt/code/localstack
+    healthcheck:
+      test:
+        - CMD
+        # - /opt/code/localstack/bin/localstack
+        # - status
+        # - services
+        # - --format=json
+        - curl
+        - -s
+        - localhost:4566/_localstack/health
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  aws: &aws
+    container_name: aws
+    image: amazon/aws-cli:2.13.9
+    volumes:
+      - ./.aws:/root/.aws
+    entrypoint: aws
+    depends_on:
+      localstack:
+        condition: service_healthy
+
+  terraform-base: &terraform_base
+    container_name: terraform
+    image: docker.io/hashicorp/terraform:1.5.5
+    volumes:
+      # - ./tf/.terraformrc:/root/.terraformrc
+      - .:/src
+      - terraform:/src/tf/.terraform/
+      - ./.aws:/root/.aws
+    working_dir: /src/tf
+    depends_on:
+      localstack:
+        condition: service_healthy
+    entrypoint: /bin/sh
+
+  terraform-run:
+    <<: *terraform_base
+    command:
+      - -c
+      - |
+        set -e
+        terraform init -upgrade
+        terraform validate
+        terraform fmt -list -write -recursive *.tf
+        terraform plan
+        terraform apply -auto-approve
+
+  terraform-shell:
+    <<: *terraform_base
+    command:
+      - -c
+      - /bin/sh
+
+  terraform:
+    <<: *terraform_base
+    entrypoint: terraform
+
+  # curl:
+  #   container_name: curl
+  #   image: docker.io/curlimages/curl:8.1.2
+  #   command: -s localstack:4566/_localstack/diagnose
+  #   depends_on:
+  #     localstack:
+  #       condition: service_healthy
+
+  tests:
+    <<: *aws
+    volumes:
+      - ./.aws:/root/.aws
+      - ./tests:/tests
+    working_dir: /tests
+    entrypoint: ./tests.sh
+    depends_on:
+      terraform-run:
+        condition: service_completed_successfully
+
+
+volumes:
+  localstack:
+  aws:
+  terraform:
